@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Weather Dashboard</title>
+  <meta name="description" content="Live weather and 5-day forecast for any city, powered by the Open-Meteo API.">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body { background: linear-gradient(160deg, #0e8f94, #1b4965); min-height: 100vh; }
+    .card { border: 0; border-radius: 1rem; }
+    .big-temp { font-size: 3.5rem; font-weight: 700; line-height: 1; }
+    .icon { font-size: 2.5rem; }
+    .forecast-card { text-align: center; }
+    .visually-hidden-focusable:focus { outline: 3px solid #ffc107; }
+  </style>
+</head>
+<body>
+  <a class="visually-hidden-focusable position-absolute bg-white p-2" href="#results">Skip to results</a>
+
+  <header class="container py-4 text-white text-center">
+    <h1 class="h2 mb-1">Weather Dashboard</h1>
+    <p class="mb-0">Search any city for current weather and a 5-day forecast</p>
+  </header>
+
+  <main class="container pb-5" style="max-width: 800px;">
+    <!-- Search -->
+    <form id="search-form" class="row g-2 mb-4" role="search">
+      <div class="col-12 col-sm">
+        <label for="city-input" class="visually-hidden">City name</label>
+        <input id="city-input" class="form-control form-control-lg" type="text"
+               placeholder="Enter a city, e.g. Patna" autocomplete="off" required>
+      </div>
+      <div class="col-6 col-sm-auto">
+        <button class="btn btn-warning btn-lg w-100" type="submit">Search</button>
+      </div>
+      <div class="col-6 col-sm-auto">
+        <button id="unit-btn" class="btn btn-outline-light btn-lg w-100" type="button"
+                aria-label="Switch temperature unit">°C</button>
+      </div>
+    </form>
+
+    <!-- Status messages (screen readers announce changes) -->
+    <div id="status" role="status" aria-live="polite" class="text-white mb-3"></div>
+    <div id="error" role="alert" class="alert alert-danger d-none"></div>
+
+    <!-- Results -->
+    <section id="results" tabindex="-1" class="d-none">
+      <div class="card shadow mb-4">
+        <div class="card-body d-flex justify-content-between align-items-center flex-wrap gap-3">
+          <div>
+            <h2 id="place" class="h4 mb-2"></h2>
+            <div class="big-temp" id="temp"></div>
+            <div id="desc" class="text-muted mt-1"></div>
+          </div>
+          <div class="text-end">
+            <div class="icon" id="icon" aria-hidden="true"></div>
+            <div class="mt-2">💧 Humidity: <span id="humidity"></span></div>
+            <div>💨 Wind: <span id="wind"></span></div>
+          </div>
+        </div>
+      </div>
+
+      <h2 class="h5 text-white mb-3">5-Day Forecast</h2>
+      <div id="forecast" class="row row-cols-2 row-cols-md-5 g-3"></div>
+    </section>
+  </main>
+
+  <footer class="text-center text-white-50 pb-4 small">
+    Data by <a class="text-white" href="https://open-meteo.com/">Open-Meteo</a>
+  </footer>
+
+  <script>
+    // ---------- Setup ----------
+    const GEO_URL = "https://geocoding-api.open-meteo.com/v1/search";
+    const WEATHER_URL = "https://api.open-meteo.com/v1/forecast";
+
+    const form = document.getElementById("search-form");
+    const input = document.getElementById("city-input");
+    const unitBtn = document.getElementById("unit-btn");
+    const statusEl = document.getElementById("status");
+    const errorEl = document.getElementById("error");
+    const resultsEl = document.getElementById("results");
+
+    let unit = "celsius";   // or "fahrenheit"
+    let lastCity = "";      // remember last search so the unit toggle can refresh
+
+    // Weather codes from Open-Meteo -> description + emoji
+    const WEATHER_CODES = {
+      0: ["Clear sky", "☀️"], 1: ["Mainly clear", "🌤️"], 2: ["Partly cloudy", "⛅"], 3: ["Overcast", "☁️"],
+      45: ["Fog", "🌫️"], 48: ["Freezing fog", "🌫️"],
+      51: ["Light drizzle", "🌦️"], 53: ["Drizzle", "🌦️"], 55: ["Heavy drizzle", "🌧️"],
+      56: ["Freezing drizzle", "🌧️"], 57: ["Freezing drizzle", "🌧️"],
+      61: ["Light rain", "🌧️"], 63: ["Rain", "🌧️"], 65: ["Heavy rain", "🌧️"],
+      66: ["Freezing rain", "🌧️"], 67: ["Freezing rain", "🌧️"],
+      71: ["Light snow", "🌨️"], 73: ["Snow", "🌨️"], 75: ["Heavy snow", "❄️"], 77: ["Snow grains", "❄️"],
+      80: ["Rain showers", "🌦️"], 81: ["Rain showers", "🌧️"], 82: ["Violent showers", "⛈️"],
+      85: ["Snow showers", "🌨️"], 86: ["Heavy snow showers", "❄️"],
+      95: ["Thunderstorm", "⛈️"], 96: ["Thunderstorm with hail", "⛈️"], 99: ["Thunderstorm with hail", "⛈️"]
+    };
+    const describe = (code) => WEATHER_CODES[code] || ["Unknown", "❔"];
+
+    // ---------- Helpers ----------
+    function showError(message) {
+      errorEl.textContent = message;
+      errorEl.classList.remove("d-none");
+      resultsEl.classList.add("d-none");
+      statusEl.textContent = "";
+    }
+    function clearError() {
+      errorEl.classList.add("d-none");
+      errorEl.textContent = "";
+    }
+    const symbol = () => (unit === "celsius" ? "°C" : "°F");
+    const windUnit = () => (unit === "celsius" ? "km/h" : "mph");
+
+    // ---------- API calls ----------
+    async function getCoordinates(city) {
+      const res = await fetch(`${GEO_URL}?name=${encodeURIComponent(city)}&count=1&language=en&format=json`);
+      if (!res.ok) throw new Error("Could not look up that city. Please try again.");
+      const data = await res.json();
+      if (!data.results || data.results.length === 0) {
+        throw new Error(`No city found for "${city}". Check the spelling and try again.`);
+      }
+      return data.results[0]; // { name, country, latitude, longitude }
+    }
+
+    async function getWeather(lat, lon) {
+      const params = new URLSearchParams({
+        latitude: lat,
+        longitude: lon,
+        current: "temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code",
+        daily: "weather_code,temperature_2m_max,temperature_2m_min",
+        forecast_days: 5,
+        timezone: "auto",
+        temperature_unit: unit,
+        wind_speed_unit: unit === "celsius" ? "kmh" : "mph"
+      });
+      const res = await fetch(`${WEATHER_URL}?${params}`);
+      if (!res.ok) throw new Error("Could not load the weather right now. Please try again.");
+      return res.json();
+    }
+
+    // ---------- Rendering ----------
+    function render(place, weather) {
+      const cur = weather.current;
+      const [desc, icon] = describe(cur.weather_code);
+
+      document.getElementById("place").textContent = `${place.name}, ${place.country || ""}`;
+      document.getElementById("temp").textContent = `${Math.round(cur.temperature_2m)}${symbol()}`;
+      document.getElementById("desc").textContent = desc;
+      document.getElementById("icon").textContent = icon;
+      document.getElementById("humidity").textContent = `${cur.relative_humidity_2m}%`;
+      document.getElementById("wind").textContent = `${Math.round(cur.wind_speed_10m)} ${windUnit()}`;
+
+      const forecastEl = document.getElementById("forecast");
+      forecastEl.innerHTML = "";
+      weather.daily.time.forEach((date, i) => {
+        const [d, ic] = describe(weather.daily.weather_code[i]);
+        const day = new Date(date + "T00:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+
+        const col = document.createElement("div");
+        col.className = "col";
+        col.innerHTML = `
+          <div class="card forecast-card shadow-sm h-100">
+            <div class="card-body p-2">
+              <div class="fw-semibold small"></div>
+              <div class="icon my-1" aria-hidden="true"></div>
+              <div class="small text-muted"></div>
+              <div class="fw-bold hi-lo"></div>
+            </div>
+          </div>`;
+        col.querySelector(".fw-semibold").textContent = day;
+        col.querySelector(".icon").textContent = ic;
+        col.querySelector(".text-muted").textContent = d;
+        col.querySelector(".hi-lo").textContent =
+          `${Math.round(weather.daily.temperature_2m_max[i])}° / ${Math.round(weather.daily.temperature_2m_min[i])}°`;
+        forecastEl.appendChild(col);
+      });
+
+      resultsEl.classList.remove("d-none");
+      statusEl.textContent = `Showing weather for ${place.name}.`;
+      resultsEl.focus();
+    }
+
+    // ---------- Main flow ----------
+    async function search(city) {
+      clearError();
+      statusEl.textContent = "Loading...";
+      try {
+        const place = await getCoordinates(city);
+        const weather = await getWeather(place.latitude, place.longitude);
+        lastCity = city;
+        render(place, weather);
+      } catch (err) {
+        // fetch() throws a TypeError when the network is down
+        const offline = err instanceof TypeError;
+        showError(offline ? "Network error. Check your internet connection and try again." : err.message);
+      }
+    }
+
+    // ---------- Events ----------
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const city = input.value.trim();
+      if (city) search(city);
+    });
+
+    unitBtn.addEventListener("click", () => {
+      unit = unit === "celsius" ? "fahrenheit" : "celsius";
+      unitBtn.textContent = symbol();
+      if (lastCity) search(lastCity); // refresh with the new unit
+    });
+
+    // Load a default city on first visit
+    search("Patna");
+  </script>
+</body>
+</html>
